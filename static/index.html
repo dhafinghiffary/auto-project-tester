@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>auto-project-tester</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --card: #f9fafb;
+    --accent: #2563eb;
+    --pass: #16a34a;
+    --fail: #dc2626;
+    --skip: #d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --fg: #e5e7eb;
+      --muted: #9ca3af;
+      --border: #2a2d34;
+      --card: #171a21;
+      --accent: #60a5fa;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-top: 0; margin-bottom: 24px; font-size: 0.9rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tab-btn {
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  .tab-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  input[type=text], input[type=file] {
+    width: 100%;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 0.9rem;
+    margin-bottom: 12px;
+  }
+  button.submit {
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent);
+    color: white;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  button.submit:disabled { opacity: 0.6; cursor: wait; }
+  #status { margin-top: 14px; color: var(--muted); font-size: 0.85rem; white-space: pre-wrap; }
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 10px;
+    margin: 16px 0;
+  }
+  .stat { border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
+  .stat .n { font-size: 1.4rem; font-weight: 600; }
+  .stat .l { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 12px; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); }
+  .outcome { font-weight: 600; }
+  .outcome.passed { color: var(--pass); }
+  .outcome.failed, .outcome.error { color: var(--fail); }
+  .outcome.skipped { color: var(--skip); }
+  pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #result { display: none; }
+  .error-box { border-color: var(--fail); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>auto-project-tester</h1>
+  <p class="subtitle">Upload ZIP atau tempel URL repo GitHub publik → AI generate pytest test → dijalankan di sandbox Docker → laporan hasil testing. (v1: Python saja)</p>
+
+  <div class="card">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="zip">Upload ZIP</button>
+      <button class="tab-btn" data-tab="github">URL GitHub</button>
+    </div>
+
+    <div class="tab-panel active" id="tab-zip">
+      <input type="file" id="zipFile" accept=".zip">
+      <button class="submit" id="btnZip">Jalankan Test</button>
+    </div>
+
+    <div class="tab-panel" id="tab-github">
+      <input type="text" id="repoUrl" placeholder="https://github.com/owner/repo">
+      <button class="submit" id="btnGithub">Jalankan Test</button>
+    </div>
+
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="result"></div>
+</div>
+
+<script>
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+  });
+});
+
+const statusEl = document.getElementById("status");
+const resultEl = document.getElementById("result");
+
+function setBusy(busy, msg) {
+  document.querySelectorAll("button.submit").forEach(b => b.disabled = busy);
+  statusEl.textContent = msg || "";
+}
+
+function outcomeClass(o) { return o; }
+
+function renderReport(report) {
+  const s = report.execution.summary;
+  const testsRows = (report.execution.tests || []).map(t => `
+    <tr>
+      <td><code>${escapeHtml(t.node_id)}</code></td>
+      <td class="outcome ${outcomeClass(t.outcome)}">${t.outcome.toUpperCase()}</td>
+      <td>${t.duration.toFixed(3)}s</td>
+    </tr>`).join("");
+
+  const failures = (report.execution.tests || [])
+    .filter(t => (t.outcome === "failed" || t.outcome === "error") && t.message)
+    .map(t => `<h4><code>${escapeHtml(t.node_id)}</code></h4><pre>${escapeHtml(t.message)}</pre>`)
+    .join("");
+
+  const generatedFiles = (report.generated_tests || [])
+    .map(f => `<li><code>${escapeHtml(f.filename)}</code> → menguji <code>${escapeHtml(f.target_module)}</code></li>`)
+    .join("");
+
+  resultEl.innerHTML = `
+    <h2>${escapeHtml(report.project_name)}</h2>
+    <p style="color:var(--muted); font-size:0.85rem;">${escapeHtml(report.source_summary)}</p>
+    <div class="summary-grid">
+      <div class="stat"><div class="n">${s.total}</div><div class="l">Total</div></div>
+      <div class="stat"><div class="n" style="color:var(--pass)">${s.passed}</div><div class="l">Passed</div></div>
+      <div class="stat"><div class="n" style="color:var(--fail)">${s.failed}</div><div class="l">Failed</div></div>
+      <div class="stat"><div class="n" style="color:var(--fail)">${s.errors}</div><div class="l">Error</div></div>
+      <div class="stat"><div class="n" style="color:var(--skip)">${s.skipped}</div><div class="l">Skipped</div></div>
+    </div>
+    ${!report.execution.install_success ? `<p style="color:var(--fail)">Install dependencies gagal — lihat log:</p><pre>${escapeHtml(report.execution.install_log)}</pre>` : ""}
+    ${report.execution.timed_out ? `<p style="color:var(--fail)">Eksekusi test timeout dan dihentikan paksa.</p>` : ""}
+    <table>
+      <thead><tr><th>Test</th><th>Hasil</th><th>Durasi</th></tr></thead>
+      <tbody>${testsRows || `<tr><td colspan="3">Tidak ada test yang dikumpulkan.</td></tr>`}</tbody>
+    </table>
+    ${failures ? `<h3>Detail Kegagalan</h3>${failures}` : ""}
+    <h3>File Test yang Digenerate AI</h3>
+    <ul>${generatedFiles || "<li>(tidak ada)</li>"}</ul>
+    ${report.generated_tests && report.generated_tests.length ? `<details><summary>Lihat isi kode test</summary>${report.generated_tests.map(f => `<h4><code>${escapeHtml(f.filename)}</code></h4><pre>${escapeHtml(f.content)}</pre>`).join("")}</details>` : ""}
+  `;
+  resultEl.style.display = "block";
+  resultEl.classList.remove("error-box");
+}
+
+function renderError(msg) {
+  resultEl.innerHTML = `<h2>Gagal</h2><pre>${escapeHtml(msg)}</pre>`;
+  resultEl.style.display = "block";
+  resultEl.classList.add("error-box");
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str ?? "";
+  return div.innerHTML;
+}
+
+async function runRequest(fn) {
+  resultEl.style.display = "none";
+  setBusy(true, "Menganalisis repo, generate test dengan AI, lalu menjalankan di sandbox Docker... ini bisa makan waktu 1-3 menit.");
+  try {
+    const resp = await fn();
+    const data = await resp.json();
+    if (!resp.ok) {
+      renderError(data.detail || JSON.stringify(data));
+    } else {
+      renderReport(data);
+    }
+  } catch (e) {
+    renderError(String(e));
+  } finally {
+    setBusy(false, "");
+  }
+}
+
+document.getElementById("btnZip").addEventListener("click", () => {
+  const fileInput = document.getElementById("zipFile");
+  if (!fileInput.files.length) { alert("Pilih file ZIP dulu"); return; }
+  const form = new FormData();
+  form.append("file", fileInput.files[0]);
+  runRequest(() => fetch("/test/zip", { method: "POST", body: form }));
+});
+
+document.getElementById("btnGithub").addEventListener("click", () => {
+  const url = document.getElementById("repoUrl").value.trim();
+  if (!url) { alert("Isi URL repo dulu"); return; }
+  runRequest(() => fetch("/test/github", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo_url: url }),
+  }));
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# --- Backend Framework ---
+fastapi
+uvicorn[standard]
+python-multipart
+
+# --- Environment Variables ---
+python-dotenv
+
+# --- LLM & AI Orchestration (Gemini) ---
+langchain
+langchain-google-genai
+
+# --- Sandbox Execution ---
+docker
