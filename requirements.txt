@@ -6,9 +6,13 @@ python-multipart
 # --- Environment Variables ---
 python-dotenv
 
-# --- LLM & AI Orchestration (Gemini) ---
+# --- LLM & AI Orchestration ---
 langchain
 langchain-google-genai
+langchain-anthropic
 
 # --- Sandbox Execution ---
 docker
+
+# --- Dev / Tests ---
+pytest

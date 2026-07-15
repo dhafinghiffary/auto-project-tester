@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class ParameterInfo(BaseModel):
@@ -86,7 +90,7 @@ class ExecutionResult(BaseModel):
 
 class TestReport(BaseModel):
     project_name: str
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=_utcnow)
     source_summary: str
     generated_tests: list[GeneratedTestFile] = Field(default_factory=list)
     execution: ExecutionResult
@@ -102,7 +106,7 @@ class TestJob(BaseModel):
     stage: str = "Menunggu giliran..."
     project_name: str
     source_summary: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
     report: TestReport | None = None
     error: str | None = None

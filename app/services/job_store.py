@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.domain.models import JobStatus, TestJob, TestReport
@@ -33,7 +33,7 @@ def _load_all() -> None:
             job.status = "failed"
             job.stage = "Terputus"
             job.error = "Server di-restart atau crash sebelum job ini selesai."
-            job.updated_at = datetime.utcnow()
+            job.updated_at = datetime.now(timezone.utc)
             _persist(job)
         _jobs[job.job_id] = job
 
@@ -69,7 +69,7 @@ def update_job(
             job.report = report
         if error is not None:
             job.error = error
-        job.updated_at = datetime.utcnow()
+        job.updated_at = datetime.now(timezone.utc)
         _persist(job)
 
 

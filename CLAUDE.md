@@ -90,21 +90,24 @@ app/
     routes_test.py    # POST /test/zip, POST /test/github (return job_id, 202),
                        #   GET /test/jobs/{id}, GET /test/jobs (history)
     schemas.py          # request schema (GithubTestRequest)
-  core/config.py     # load .env (GOOGLE_API_KEY)
-  main.py            # FastAPI app, serve static/index.html di "/"
+  core/config.py     # load .env (GOOGLE_API_KEY, ANTHROPIC_API_KEY, LLM_PROVIDER)
+  main.py            # FastAPI app, sweep workspaces/ on startup, serve static/index.html di "/"
 static/index.html   # UI upload sederhana (tab ZIP / URL GitHub), polling job status + riwayat
 docker/sandbox.Dockerfile   # image sandbox: python:3.11-slim, user non-root, venv, pytest
 sample_repo/         # project Python sintetis kecil dengan 1 bug sengaja (buat smoke test)
 sample_repo.zip       # sample_repo di-zip, siap upload langsung
 job_history/           # (gitignored) riwayat job sebagai file JSON, dibaca job_store.py
+tests/                  # unit test host-side, hermetic (tanpa LLM/network) -- `pytest tests/`
 ```
 
 ## Tech stack
 
-Python + FastAPI, `docker` SDK (orkestrasi sandbox), LangChain + Google Gemini (`gemini-2.5-flash`,
-`with_structured_output`, pola sama seperti `LLMService` di `auto-document-generator`), Python
+Python + FastAPI, `docker` SDK (orkestrasi sandbox), LangChain + Google Gemini (`gemini-2.5-flash`)
+atau Claude (`claude-sonnet-5` via `langchain-anthropic`, toggle lewat `LLM_PROVIDER`) dengan
+`with_structured_output`, pola sama seperti `LLMService` di `auto-document-generator`, Python
 `ast` module untuk parsing (bukan Tree-sitter — cukup untuk Python-only v1, generic multi-bahasa
-bisa nyusul kalau perlu), pytest + `pytest-json-report` (dijalankan di dalam container, bukan di host).
+bisa nyusul kalau perlu), pytest + `pytest-json-report` (dijalankan di dalam container sandbox,
+terpisah dari `pytest` host-side yang dipakai buat `tests/` project ini sendiri).
 
 ## Kontrak internal antar-tahap (solo project, tapi tetap didokumentasikan biar jelas)
 
@@ -143,23 +146,37 @@ repo dulu.
   bisa dicek lewat `GET /test/jobs/{id}` dan `GET /test/jobs` (disimpan sebagai file JSON di
   `job_history/`, bukan database — cukup untuk skala saat ini). Lihat `app/services/job_store.py`.
 - **Kuota gratis Gemini API cuma 20 request/hari** (free tier `gemini-2.5-flash`) — kepakai habis
-  cuma dari testing semalam + hari ini. Kalau kena `RESOURCE_EXHAUSTED (429)`, tunggu reset kuota
-  harian (sekitar tengah malam Pacific Time) atau ganti `GOOGLE_API_KEY` di `.env` ke key lain/plan
-  berbayar. Ini WAJIB diperhitungkan sebelum ada rencana multi-user beneran — 20 request/hari tidak
-  akan cukup untuk lebih dari segelintir test run per hari.
+  cuma dari testing semalam + hari ini, dan **belum reset per 2026-07-15 malam**. Kalau kena
+  `RESOURCE_EXHAUSTED (429)`, tunggu reset kuota harian (sekitar tengah malam Pacific Time) atau
+  ganti provider. **Update**: sekarang ada toggle `LLM_PROVIDER=gemini|anthropic` di `.env`
+  (`app/core/config.py`, dipakai di `test_generator_service.py`) — begitu ada `ANTHROPIC_API_KEY`
+  (Claude Sonnet 5), tinggal ganti env var, tidak perlu ubah kode. Belum divalidasi live (belum ada
+  key), tapi sudah dites bisa diimpor tanpa error dan lulus test suite. Ini WAJIB diperhitungkan
+  sebelum ada rencana multi-user beneran — 20 request/hari tidak akan cukup untuk lebih dari
+  segelintir test run per hari.
 - **Timeout Gemini call 150s, 1x retry** (`test_generator_service.py`) — sebelumnya tanpa timeout
   sama sekali sehingga request yang lambat bisa menggantung selamanya tanpa pernah gagal ataupun
   selesai; ini penyebab paling mungkin dari laporan "macet lama tanpa hasil" di awal pemakaian.
-- **Workspace tidak di-cleanup otomatis** — tiap request bikin folder baru di `workspaces/`
-  (di-gitignore), tidak dihapus setelah selesai, supaya bisa diinspeksi manual untuk debugging.
-  Perlu dibersihkan manual atau ditambah cleanup job kalau dipakai lama.
-- **Belum ada unit test untuk kode `auto-project-tester` sendiri** (ironis, tapi memang belum
-  sempat — prioritas semalam adalah pipeline utamanya jalan dulu).
+- **~~Workspace tidak di-cleanup otomatis~~ — sudah diperbaiki 2026-07-15**: `cleanup_stale_workspaces()`
+  (`app/ingestion/workspace.py`) jalan otomatis saat FastAPI startup, hapus folder di `workspaces/`
+  yang lebih tua dari 24 jam (`DEFAULT_RETENTION_HOURS`). Cukup untuk skala saat ini; belum ada
+  cleanup periodik selagi server jalan lama tanpa restart (cuma jalan sekali di startup).
+- **~~Belum ada unit test~~ — sudah diperbaiki 2026-07-15**: 37 unit test di `tests/`, cover semua
+  bagian yang TIDAK butuh panggilan LLM live (ingestion, parser, report, job store, helper
+  validasi) — sengaja dibuat hermetic (tanpa network/API call) supaya tetap bisa jalan meski kuota
+  Gemini habis. `test_generator_service.py`'s LLM call sendiri (`chain.invoke`) belum ada test
+  (butuh live API atau mocking LangChain yang lebih rumit — belum sempat).
 - **`analyze_project` membatasi ke 40 file pertama** dan **LLM prompt dibatasi ke 15 file** —
-  supaya prompt tidak meledak untuk repo besar. Repo besar akan dites parsial saja.
+  supaya prompt tidak meledak untuk repo besar. Repo besar akan dites parsial saja. **Update
+  2026-07-15**: cara mengumpulkan file kandidat sekarang pakai `os.walk` dengan prune direktori
+  skip (`venv/`, `node_modules/`, dst) langsung saat traversal, bukan `rglob` lalu difilter — yang
+  lama tetap menjelajahi seluruh isi `node_modules`/`venv` sebelum hasilnya dibuang, lambat parah
+  di repo dengan dependency vendored besar. Fix ini murni algoritmik, sudah ada unit test-nya.
 - **Belum dites ke variasi repo Python yang luas** — baru divalidasi manual terhadap `sample_repo`
-  sintetis. Perlu dicoba ke beberapa repo publik nyata untuk lihat seberapa bagus kualitas test
-  yang di-generate LLM dan seberapa sering `pip install` gagal karena dependency yang aneh-aneh.
-- **`generated_tests/` yang ditulis LLM tidak divalidasi syntax-nya sebelum dijalankan** — kalau
-  LLM menghasilkan Python yang tidak valid, pytest akan collection-error dan itu akan muncul di
-  laporan sebagai error, bukan dicegah lebih awal.
+  sintetis dan satu repo Flask asli (lihat riwayat percakapan). Perlu dicoba ke beberapa repo
+  publik nyata untuk lihat seberapa bagus kualitas test yang di-generate LLM dan seberapa sering
+  `pip install` gagal karena dependency yang aneh-aneh.
+- **~~`generated_tests/` tidak divalidasi syntax~~ — sudah diperbaiki 2026-07-15**: tiap file yang
+  dihasilkan LLM sekarang di-`ast.parse()` sebelum ditulis ke sandbox; yang gagal parse di-skip dan
+  alasannya masuk ke `model_notes` di laporan, bukan muncul sebagai pytest collection-error yang
+  membingungkan.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 
 from app.domain.models import ClassInfo, FileAnalysis, FunctionInfo, ParameterInfo, ParsedProjectContext
@@ -104,15 +105,29 @@ def analyze_file(path: Path, relative_path: str) -> FileAnalysis:
     )
 
 
+def _collect_candidate_files(root: Path) -> list[Path]:
+    """Walk the tree pruning SKIP_DIR_NAMES directories in place, so huge
+    vendored trees (venv/, node_modules/) are never descended into at all --
+    rglob-then-filter would still walk them before discarding the results.
+    Stops as soon as MAX_FILES_ANALYZED candidates are found."""
+    candidates: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            candidate = Path(dirpath) / name
+            if _is_test_file(candidate):
+                continue
+            candidates.append(candidate)
+            if len(candidates) >= MAX_FILES_ANALYZED:
+                return candidates
+    return candidates
+
+
 def analyze_project(root: Path, project_name: str) -> ParsedProjectContext:
     files: list[FileAnalysis] = []
-    for py_file in sorted(root.rglob("*.py")):
-        if any(part in SKIP_DIR_NAMES for part in py_file.relative_to(root).parts[:-1]):
-            continue
-        if _is_test_file(py_file):
-            continue
-        if len(files) >= MAX_FILES_ANALYZED:
-            break
+    for py_file in sorted(_collect_candidate_files(root)):
         relative = py_file.relative_to(root).as_posix()
         files.append(analyze_file(py_file, relative))
 

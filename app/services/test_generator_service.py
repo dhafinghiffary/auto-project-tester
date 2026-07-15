@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
+from app.core.config import LLM_PROVIDER
 from app.domain.models import GeneratedTestFile, ParsedProjectContext, TestGenerationResult
 
 MAX_FILES_FOR_PROMPT = 15
@@ -72,14 +73,32 @@ def _safe_test_filename(name: str, fallback_index: int) -> str:
     return name
 
 
+def _python_syntax_error(content: str, filename: str) -> str | None:
+    """Returns a human-readable error if content isn't valid Python, else None.
+    Catches bad LLM output before it reaches the sandbox as an opaque pytest
+    collection error."""
+    try:
+        ast.parse(content, filename=filename)
+        return None
+    except SyntaxError as exc:
+        return f"{filename} punya syntax error dan di-skip: {exc.msg} (baris {exc.lineno})"
+
+
+def _build_llm(provider: str):
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        return ChatAnthropic(model="claude-sonnet-5", temperature=0, timeout=150, max_retries=1)
+    if provider == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        return ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, timeout=150, max_retries=1)
+    raise ValueError(f"LLM_PROVIDER tidak dikenal: '{provider}' (pakai 'gemini' atau 'anthropic')")
+
+
 class TestGeneratorService:
-    def __init__(self) -> None:
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0,
-            timeout=150,
-            max_retries=1,
-        )
+    def __init__(self, provider: str = LLM_PROVIDER) -> None:
+        self.llm = _build_llm(provider)
         self.structured_llm = self.llm.with_structured_output(_LLMTestGenerationResult)
 
     def generate_tests(self, context: ParsedProjectContext) -> TestGenerationResult:
@@ -108,15 +127,28 @@ class TestGeneratorService:
 
         seen_names: set[str] = set()
         files: list[GeneratedTestFile] = []
+        skip_notes: list[str] = []
         for i, f in enumerate(result.files):
             name = _safe_test_filename(f.filename, i)
             while name in seen_names:
                 name = f"{name[:-3]}_{i}.py"
+            content = _strip_fences(f.content)
+
+            syntax_error = _python_syntax_error(content, name)
+            if syntax_error:
+                skip_notes.append(syntax_error)
+                continue
+
             seen_names.add(name)
             files.append(GeneratedTestFile(
                 filename=name,
                 target_module=f.target_module,
-                content=_strip_fences(f.content),
+                content=content,
             ))
 
-        return TestGenerationResult(files=files, model_notes=result.model_notes)
+        model_notes = result.model_notes
+        if skip_notes:
+            extra = "\n".join(skip_notes)
+            model_notes = f"{model_notes}\n{extra}" if model_notes else extra
+
+        return TestGenerationResult(files=files, model_notes=model_notes)
