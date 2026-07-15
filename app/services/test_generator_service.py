@@ -74,7 +74,12 @@ def _safe_test_filename(name: str, fallback_index: int) -> str:
 
 class TestGeneratorService:
     def __init__(self) -> None:
-        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0,
+            timeout=90,
+            max_retries=1,
+        )
         self.structured_llm = self.llm.with_structured_output(_LLMTestGenerationResult)
 
     def generate_tests(self, context: ParsedProjectContext) -> TestGenerationResult:
