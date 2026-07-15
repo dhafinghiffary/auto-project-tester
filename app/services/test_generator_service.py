@@ -77,7 +77,7 @@ class TestGeneratorService:
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0,
-            timeout=90,
+            timeout=150,
             max_retries=1,
         )
         self.structured_llm = self.llm.with_structured_output(_LLMTestGenerationResult)
