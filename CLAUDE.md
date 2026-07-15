@@ -38,9 +38,16 @@ Sandbox Executor (Docker, container efemeral, 2 fase: install deps [network ON] 
 Report Generator (JSON terstruktur + Markdown human-readable)
 ```
 
-Ini SATU pipeline sinkron (belum ada job queue/background task) — request HTTP nunggu
-sampai seluruh pipeline selesai (ingest → parse → LLM → sandbox → report). Untuk repo kecil
-biasanya 1-3 menit tergantung Gemini API + waktu Docker install/exec.
+**Update 2026-07-15**: sekarang berjalan sebagai job asinkron, bukan request sinkron yang
+blocking. `POST /test/zip` / `/test/github` langsung return `job_id` (202) dan proses jalan di
+thread terpisah (`app/services/job_store.py`); client poll `GET /test/jobs/{id}` untuk lihat
+stage berjalan (`Menganalisis struktur kode...` → `Generate test dengan AI...` → `Menjalankan
+test di sandbox Docker...` → `Selesai`) dan hasil akhirnya. Riwayat job tersimpan di
+`job_history/` (file JSON, bukan database) lewat `GET /test/jobs`. Ini juga memperbaiki bug
+awal: sebelumnya pipeline blocking dijalankan langsung di dalam `async def` route handler,
+yang berarti SATU request lambat membekukan seluruh server untuk semua request lain juga
+(bukan cuma request itu sendiri) — sudah diperbaiki dengan `run_in_threadpool`/`BackgroundTasks`.
+Untuk repo kecil biasanya 1-3 menit tergantung Gemini API + waktu Docker install/exec.
 
 ## Kenapa Docker sandbox, bukan langsung `subprocess.run` di host
 
@@ -76,17 +83,20 @@ app/
     test_generator_service.py  # LLMService setara: generate pytest test dari context
     sandbox_executor.py         # orkestrasi Docker, dua-fase, lihat penjelasan di atas
     report_service.py            # build TestReport (JSON + markdown) dari hasil eksekusi
-    pipeline.py                   # rangkai semua tahap jadi satu fungsi run_pipeline()
+    pipeline.py                   # rangkai semua tahap jadi run_pipeline(..., on_stage=callback)
+    job_store.py                   # TestJob in-memory dict + persist ke job_history/*.json
     errors.py                      # SandboxError
   api/
-    routes_test.py    # POST /test/zip, POST /test/github
+    routes_test.py    # POST /test/zip, POST /test/github (return job_id, 202),
+                       #   GET /test/jobs/{id}, GET /test/jobs (history)
     schemas.py          # request schema (GithubTestRequest)
   core/config.py     # load .env (GOOGLE_API_KEY)
   main.py            # FastAPI app, serve static/index.html di "/"
-static/index.html   # UI upload sederhana (tab ZIP / URL GitHub), fetch ke API, render laporan
+static/index.html   # UI upload sederhana (tab ZIP / URL GitHub), polling job status + riwayat
 docker/sandbox.Dockerfile   # image sandbox: python:3.11-slim, user non-root, venv, pytest
 sample_repo/         # project Python sintetis kecil dengan 1 bug sengaja (buat smoke test)
 sample_repo.zip       # sample_repo di-zip, siap upload langsung
+job_history/           # (gitignored) riwayat job sebagai file JSON, dibaca job_store.py
 ```
 
 ## Tech stack
@@ -127,8 +137,19 @@ repo dulu.
 - **Sandbox Docker belum hardened untuk multi-tenant publik** (lihat penjelasan bagian atas) —
   cukup untuk pemakaian lokal/personal, JANGAN di-deploy sebagai SaaS publik tanpa isolasi lebih
   kuat (gVisor, Firecracker/microVM, atau layanan sandbox managed) plus rate limiting & auth.
-- **Sinkron, bukan job queue** — request HTTP menunggu seluruh pipeline selesai; untuk repo besar
-  ini bisa lambat/timeout di sisi client. Belum ada progress streaming/websocket.
+- **~~Sinkron, bukan job queue~~ — sudah diperbaiki 2026-07-15**: `POST /test/zip` dan
+  `/test/github` sekarang langsung return `job_id` (202) dan jalan di background thread
+  (`BackgroundTasks` + threadpool), bukan blocking event loop. Progress per-stage dan riwayat job
+  bisa dicek lewat `GET /test/jobs/{id}` dan `GET /test/jobs` (disimpan sebagai file JSON di
+  `job_history/`, bukan database — cukup untuk skala saat ini). Lihat `app/services/job_store.py`.
+- **Kuota gratis Gemini API cuma 20 request/hari** (free tier `gemini-2.5-flash`) — kepakai habis
+  cuma dari testing semalam + hari ini. Kalau kena `RESOURCE_EXHAUSTED (429)`, tunggu reset kuota
+  harian (sekitar tengah malam Pacific Time) atau ganti `GOOGLE_API_KEY` di `.env` ke key lain/plan
+  berbayar. Ini WAJIB diperhitungkan sebelum ada rencana multi-user beneran — 20 request/hari tidak
+  akan cukup untuk lebih dari segelintir test run per hari.
+- **Timeout Gemini call 150s, 1x retry** (`test_generator_service.py`) — sebelumnya tanpa timeout
+  sama sekali sehingga request yang lambat bisa menggantung selamanya tanpa pernah gagal ataupun
+  selesai; ini penyebab paling mungkin dari laporan "macet lama tanpa hasil" di awal pemakaian.
 - **Workspace tidak di-cleanup otomatis** — tiap request bikin folder baru di `workspaces/`
   (di-gitignore), tidak dihapus setelah selesai, supaya bisa diinspeksi manual untuk debugging.
   Perlu dibersihkan manual atau ditambah cleanup job kalau dipakai lama.
