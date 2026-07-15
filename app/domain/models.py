@@ -91,3 +91,18 @@ class TestReport(BaseModel):
     generated_tests: list[GeneratedTestFile] = Field(default_factory=list)
     execution: ExecutionResult
     markdown: str
+
+
+JobStatus = Literal["queued", "running", "done", "failed"]
+
+
+class TestJob(BaseModel):
+    job_id: str
+    status: JobStatus = "queued"
+    stage: str = "Menunggu giliran..."
+    project_name: str
+    source_summary: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    report: TestReport | None = None
+    error: str | None = None

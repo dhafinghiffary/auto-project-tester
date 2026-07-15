@@ -77,7 +77,16 @@
     cursor: pointer;
   }
   button.submit:disabled { opacity: 0.6; cursor: wait; }
-  #status { margin-top: 14px; color: var(--muted); font-size: 0.85rem; white-space: pre-wrap; }
+  .status-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 0.85rem; color: var(--muted); }
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .summary-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
@@ -105,6 +114,18 @@
   }
   #result { display: none; }
   .error-box { border-color: var(--fail); }
+  .job-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+    font-size: 0.85rem; cursor: pointer;
+  }
+  .job-row:last-child { border-bottom: none; }
+  .job-row:hover { color: var(--accent); }
+  .badge { padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; }
+  .badge.done { background: color-mix(in srgb, var(--pass) 20%, transparent); color: var(--pass); }
+  .badge.failed { background: color-mix(in srgb, var(--fail) 20%, transparent); color: var(--fail); }
+  .badge.running, .badge.queued { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+  h2 small { font-weight: 400; color: var(--muted); font-size: 0.7em; }
 </style>
 </head>
 <body>
@@ -128,10 +149,18 @@
       <button class="submit" id="btnGithub">Jalankan Test</button>
     </div>
 
-    <div id="status"></div>
+    <div class="status-row" id="statusRow" style="display:none;">
+      <div class="spinner" id="spinner"></div>
+      <span id="statusText"></span>
+    </div>
   </div>
 
   <div class="card" id="result"></div>
+
+  <div class="card">
+    <h2>Riwayat</h2>
+    <div id="history">Memuat...</div>
+  </div>
 </div>
 
 <script>
@@ -144,12 +173,22 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
   });
 });
 
-const statusEl = document.getElementById("status");
+const statusRow = document.getElementById("statusRow");
+const statusText = document.getElementById("statusText");
 const resultEl = document.getElementById("result");
+const historyEl = document.getElementById("history");
 
-function setBusy(busy, msg) {
+let pollTimer = null;
+
+function setBusy(busy) {
   document.querySelectorAll("button.submit").forEach(b => b.disabled = busy);
-  statusEl.textContent = msg || "";
+  statusRow.style.display = busy ? "flex" : "none";
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str ?? "";
+  return div.innerHTML;
 }
 
 function outcomeClass(o) { return o; }
@@ -197,33 +236,60 @@ function renderReport(report) {
   resultEl.classList.remove("error-box");
 }
 
-function renderError(msg) {
-  resultEl.innerHTML = `<h2>Gagal</h2><pre>${escapeHtml(msg)}</pre>`;
+function renderError(msg, projectName) {
+  resultEl.innerHTML = `<h2>${escapeHtml(projectName || "Gagal")}</h2><pre>${escapeHtml(msg)}</pre>`;
   resultEl.style.display = "block";
   resultEl.classList.add("error-box");
 }
 
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str ?? "";
-  return div.innerHTML;
+async function pollJob(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch(`/test/jobs/${jobId}`);
+      const job = await resp.json();
+      if (!resp.ok) {
+        clearInterval(pollTimer);
+        setBusy(false);
+        renderError(job.detail || JSON.stringify(job));
+        return;
+      }
+      statusText.textContent = job.stage;
+      if (job.status === "done") {
+        clearInterval(pollTimer);
+        setBusy(false);
+        renderReport(job.report);
+        loadHistory();
+      } else if (job.status === "failed") {
+        clearInterval(pollTimer);
+        setBusy(false);
+        renderError(job.error || "Gagal tanpa keterangan.", job.project_name);
+        loadHistory();
+      }
+    } catch (e) {
+      // transient fetch error while polling -- keep trying, don't kill the poll loop
+    }
+  }, 1500);
 }
 
-async function runRequest(fn) {
+async function startJob(fn) {
   resultEl.style.display = "none";
-  setBusy(true, "Menganalisis repo, generate test dengan AI, lalu menjalankan di sandbox Docker... ini bisa makan waktu 1-3 menit.");
+  setBusy(true);
+  statusText.textContent = "Mengirim...";
   try {
     const resp = await fn();
-    const data = await resp.json();
+    const job = await resp.json();
     if (!resp.ok) {
-      renderError(data.detail || JSON.stringify(data));
-    } else {
-      renderReport(data);
+      setBusy(false);
+      renderError(job.detail || JSON.stringify(job));
+      return;
     }
+    statusText.textContent = job.stage;
+    loadHistory();
+    pollJob(job.job_id);
   } catch (e) {
+    setBusy(false);
     renderError(String(e));
-  } finally {
-    setBusy(false, "");
   }
 }
 
@@ -232,18 +298,57 @@ document.getElementById("btnZip").addEventListener("click", () => {
   if (!fileInput.files.length) { alert("Pilih file ZIP dulu"); return; }
   const form = new FormData();
   form.append("file", fileInput.files[0]);
-  runRequest(() => fetch("/test/zip", { method: "POST", body: form }));
+  startJob(() => fetch("/test/zip", { method: "POST", body: form }));
 });
 
 document.getElementById("btnGithub").addEventListener("click", () => {
   const url = document.getElementById("repoUrl").value.trim();
   if (!url) { alert("Isi URL repo dulu"); return; }
-  runRequest(() => fetch("/test/github", {
+  startJob(() => fetch("/test/github", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ repo_url: url }),
   }));
 });
+
+function timeAgo(iso) {
+  const d = new Date(iso + "Z");
+  const secs = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (secs < 60) return `${secs}d lalu`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m lalu`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}j lalu`;
+  return d.toLocaleString();
+}
+
+async function loadHistory() {
+  try {
+    const resp = await fetch("/test/jobs");
+    const jobs = await resp.json();
+    if (!jobs.length) {
+      historyEl.innerHTML = `<p style="color:var(--muted); font-size:0.85rem;">Belum ada riwayat.</p>`;
+      return;
+    }
+    historyEl.innerHTML = jobs.map(j => `
+      <div class="job-row" data-job-id="${j.job_id}">
+        <span>${escapeHtml(j.project_name)} <span style="color:var(--muted)">— ${timeAgo(j.created_at)}</span></span>
+        <span class="badge ${j.status}">${j.status}</span>
+      </div>
+    `).join("");
+    document.querySelectorAll(".job-row").forEach(row => {
+      row.addEventListener("click", async () => {
+        const resp = await fetch(`/test/jobs/${row.dataset.jobId}`);
+        const job = await resp.json();
+        if (job.status === "done") renderReport(job.report);
+        else if (job.status === "failed") renderError(job.error, job.project_name);
+        else renderError(`Status: ${job.stage}`, job.project_name);
+      });
+    });
+  } catch (e) {
+    historyEl.innerHTML = `<p style="color:var(--fail); font-size:0.85rem;">Gagal memuat riwayat.</p>`;
+  }
+}
+
+loadHistory();
 </script>
 </body>
 </html>

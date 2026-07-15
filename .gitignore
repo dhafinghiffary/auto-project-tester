@@ -6,5 +6,6 @@ venv/
 *.egg-info/
 .pytest_cache/
 workspaces/
+job_history/
 *.log
 .DS_Store
